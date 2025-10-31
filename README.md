@@ -1,4 +1,19 @@
 ## Agente simples de leitura de vencimento
+### API (FastAPI)
+
+Subir a API:
+
+```bash
+pip install -r requirements.txt
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Endpoints:
+- POST `/extract` (multipart): campo `file` com `.pdf/.jpg/.png/.txt` → retorna JSON de extração e grava em `retornos/`.
+- POST `/extract/by-path` (JSON): `{ "path": "arquivo.pdf" }` → busca em `dados/` se necessário.
+
+Saídas padronizadas são gravadas em `retornos/extracao_N.json` e, se inédito, `retornos/transcricao_N.json`.
+
 
 Este projeto contém um agente básico em Python que lê o conteúdo de um documento (texto ou PDF) e tenta extrair a data de vencimento (vencimento de boleto/fatura/pagamento).
 

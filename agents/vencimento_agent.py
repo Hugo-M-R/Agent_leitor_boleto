@@ -466,6 +466,38 @@ def _next_transcription_path(base_dir: str) -> str:
 		n += 1
 
 
+def _last_transcription_path(base_dir: str) -> Optional[str]:
+	"""Retorna o caminho do último transcricao_N.json existente, se houver."""
+	last = None
+	n = 1
+	while True:
+		candidate = os.path.join(base_dir, f"transcricao_{n}.json")
+		if not os.path.exists(candidate):
+			break
+		last = candidate
+		n += 1
+	return last
+
+
+def _is_duplicate_transcription(base_dir: str, new_text: str) -> bool:
+	"""Retorna True se já existir algum transcricao_*.json com o mesmo conteúdo."""
+	try:
+		import json as _json
+		idx = 1
+		while True:
+			path = os.path.join(base_dir, f"transcricao_{idx}.json")
+			if not os.path.exists(path):
+				break
+			with open(path, "r", encoding="utf-8") as f:
+				obj = _json.load(f)
+				if isinstance(obj, dict) and obj.get("transcricao", "") == new_text:
+					return True
+			idx += 1
+	except Exception:
+		return False
+	return False
+
+
 def main() -> None:
 	import argparse
 	import json
@@ -475,20 +507,40 @@ def main() -> None:
 	parser.add_argument("--dump-text", action="store_true", help="Mantido por compatibilidade; agora o texto completo é sempre salvo em <arquivo>_texto.txt")
 	args = parser.parse_args()
 
+	def _resolve_input_path(user_path: str) -> str:
+		# Se o caminho existir, retorna direto
+		if os.path.exists(user_path):
+			return user_path
+		# Tenta dentro da pasta 'dados' relativa ao CWD
+		dados_dir = os.path.join(os.getcwd(), "dados")
+		dados_path = os.path.join(dados_dir, user_path)
+		if os.path.exists(dados_path):
+			return dados_path
+		# Busca por nome (case-insensitive) dentro de 'dados'
+		try:
+			for fname in os.listdir(dados_dir):
+				if fname.lower() == os.path.basename(user_path).lower():
+					return os.path.join(dados_dir, fname)
+		except Exception:
+			pass
+		return user_path
+
+	input_path = _resolve_input_path(args.input)
+
 	if args.input == "-":
 		import sys
 		text = sys.stdin.read()
 		res = extract_due_date(text)
 	else:
 		# Carrega texto bruto para possível dump, e extrai vencimento
-		path_lower = args.input.lower()
+		path_lower = input_path.lower()
 		raw_text = ""
 		if path_lower.endswith(".txt"):
-			raw_text = _read_text_file(args.input)
+			raw_text = _read_text_file(input_path)
 		elif path_lower.endswith(".pdf"):
-			raw_text = _read_pdf_text(args.input)
+			raw_text = _read_pdf_text(input_path)
 		elif path_lower.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")):
-			raw_text = _read_image_text(args.input)
+			raw_text = _read_image_text(input_path)
 		# extrai informações completas
 		payment_info = extract_payment_info(raw_text)
 		res = {
@@ -498,7 +550,7 @@ def main() -> None:
 		}
 
 		# Caminho base apenas para referência de diretório
-		base, _ = os.path.splitext(args.input)
+		base, _ = os.path.splitext(input_path)
 
 		# Gravar JSON sequencial com as informações para outro agente (único arquivo gerado)
 		try:
@@ -510,11 +562,14 @@ def main() -> None:
 			with open(json_out, "w", encoding="utf-8") as jf:
 				jf.write(_json.dumps(payment_info, ensure_ascii=False, indent=2))
 
-			# Gravar JSON de transcrição completa do documento
-			trans_out = _next_transcription_path(base_dir)
-			with open(trans_out, "w", encoding="utf-8") as tf:
-				_tf_obj = {"transcricao": raw_text or ""}
-				tf.write(_json.dumps(_tf_obj, ensure_ascii=False, indent=2))
+
+			# Gravar JSON de transcrição completa do documento (evitar duplicados)
+			new_text = raw_text or ""
+			if not _is_duplicate_transcription(base_dir, new_text):
+				trans_out = _next_transcription_path(base_dir)
+				with open(trans_out, "w", encoding="utf-8") as tf:
+					_tf_obj = {"transcricao": new_text}
+					tf.write(_json.dumps(_tf_obj, ensure_ascii=False, indent=2))
 		except Exception:
 			pass
 
