@@ -1,1 +1,0 @@
-python -m agents.vencimento_agent .\baneselabes.pdf

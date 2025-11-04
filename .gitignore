@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+baseVisual/frontend/.vite/
+baseVisual/frontend/node_modules/
+baseVisual/frontend/dist/
+baseVisual/node_modules/
+retornos/
+agentics/retornos/
