@@ -1,0 +1,29 @@
+# VCS e editor
+.git
+.gitignore
+**/.vscode
+**/.idea
+
+# Python
+**/__pycache__
+**/*.pyc
+.venv
+
+# Dados grandes e artefatos
+retornos
+imagens
+logs
+**/*.pdf
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.tif
+**/*.tiff
+
+# Frontend externo
+frontend
+
+# Outros
+node_modules
+.DS_Store
+
