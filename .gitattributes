@@ -1,0 +1,25 @@
+# Padroniza finais de linha por tipo de arquivo
+
+# Scripts shell devem usar LF (Unix)
+*.sh text eol=lf
+
+# Scripts PowerShell no Windows podem usar CRLF
+*.ps1 text eol=crlf
+
+# Código fonte em geral com LF
+*.py  text eol=lf
+*.ts  text eol=lf
+*.tsx text eol=lf
+*.js  text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.md  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binários
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.pdf -text
