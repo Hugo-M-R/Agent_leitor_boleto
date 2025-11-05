@@ -396,6 +396,19 @@ def extract_boleto_fields(text: str) -> Dict[str, Any]:
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def format_boleto_core_fields(full_text: str) -> Dict[str, Any]:
+    """Mapeia os campos extraídos para o formato mínimo solicitado.
+    Retorna apenas: vencimento, linha_digitavel, beneficiario_cnpj, beneficiario_nome.
+    """
+    extracted = extract_boleto_fields(full_text)
+    return {
+        "vencimento": extracted.get("vencimento"),
+        "linha_digitavel": extracted.get("linha_digitavel"),
+        "beneficiario_cnpj": extracted.get("cpf_cnpj"),
+        "beneficiario_nome": extracted.get("cedente"),
+    }
+
+
 @app.get("/")
 async def root():
     """Endpoint raiz"""
@@ -505,6 +518,56 @@ async def extract_boleto(
         lang: Idioma para OCR (padrão: por+eng)
     """
     return await extract(file=file, lang=lang, extract_fields=True)
+
+
+@app.post("/extract-boleto-fields")
+async def extract_boleto_fields_min(
+    file: UploadFile = File(...),
+    lang: str = Form("por+eng")
+):
+    """
+    Extrai apenas os campos essenciais do boleto e retorna JSON mínimo:
+      - vencimento
+      - linha_digitavel
+      - beneficiario_cnpj
+      - beneficiario_nome
+    """
+    # Validação de extensão
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in [".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".bmp"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato não suportado: {ext}. Use PDF ou imagem."
+        )
+
+    content = await file.read()
+
+    # Salva temporário se PDF para processar por páginas
+    if ext == ".pdf":
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(content)
+            tmp.flush()
+            tmp_path = tmp.name
+        try:
+            pages = ocr_pdf(tmp_path, lang)
+            full_text = " ".join([p["text"] for p in pages])
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    else:
+        # Imagem única
+        text = ocr_with_tesseract(content, lang)
+        if len(text.strip()) < 20:
+            text = ocr_with_easyocr(content)
+        full_text = text
+
+    core = format_boleto_core_fields(full_text)
+
+    return {
+        "success": True,
+        "source": file.filename,
+        "fields": core
+    }
 
 
 @app.post("/extract-from-path")
