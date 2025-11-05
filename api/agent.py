@@ -29,6 +29,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Armazena o último JSON extraído para integração com agente validador
+last_json_extracted: Dict[str, Any] = {}
+ID_SEQUENCIAL: int = 0
+
 
 def ocr_with_tesseract(image_bytes: bytes, lang: str = "por+eng") -> str:
     """Executa OCR usando Tesseract"""
@@ -417,7 +421,9 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "/extract": "POST - Extrai texto de PDF ou imagem",
-            "/extract-boleto": "POST - Extrai texto e campos de boleto"
+            "/extract-boleto": "POST - Extrai texto e campos de boleto",
+            "/extract-boleto-fields": "POST - Retorna e armazena JSON mínimo (pré-setado) para validador",
+            "/get_last_json_extracted": "GET - Retorna último JSON extraído"
         }
     }
 
@@ -563,11 +569,37 @@ async def extract_boleto_fields_min(
 
     core = format_boleto_core_fields(full_text)
 
+    # Armazena último JSON extraído em formato mínimo para consumo externo
+    global last_json_extracted, ID_SEQUENCIAL
+    ID_SEQUENCIAL += 1
+    last_json_extracted = {
+        "id_processo": ID_SEQUENCIAL,
+        "arquivo": file.filename,
+        "linha_digitavel": core.get("linha_digitavel"),
+        "data_vencimento": core.get("vencimento"),
+        "cnpj_beneficiario": core.get("beneficiario_cnpj"),
+        "beneficiario": core.get("beneficiario_nome"),
+        "status_pronto": True
+    }
+
     return {
         "success": True,
         "source": file.filename,
         "fields": core
     }
+
+
+@app.get("/get_last_json_extracted")
+def get_last_json_extracted():
+    """
+    Retorna o último JSON extraído/simulado para consumo por outro agente (via GET).
+    """
+    if not last_json_extracted:
+        raise HTTPException(status_code=404, detail="Nenhum dado extraído disponível.")
+    # Oculta campos internos
+    hidden_keys = {"id_processo", "arquivo", "status_pronto"}
+    filtered = {k: v for k, v in last_json_extracted.items() if k not in hidden_keys}
+    return filtered
 
 
 @app.post("/extract-from-path")
