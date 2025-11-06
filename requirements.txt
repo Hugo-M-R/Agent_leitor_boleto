@@ -10,4 +10,5 @@ python-dateutil>=2.8.2
 regex>=2023.10.3
 google-generativeai>=0.3.2
 python-dotenv>=1.0.0
+langfuse>=2.0.0
 

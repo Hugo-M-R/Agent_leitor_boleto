@@ -36,6 +36,11 @@ from api.agent import (
     extract_boleto_fields
 )
 
+# Observabilidade centralizada
+from api.observability import (
+    create_trace, create_span, log_error, is_enabled
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -226,70 +231,156 @@ Use estas ferramentas quando o usuário solicitar processamento de arquivos.
         Returns:
             Resposta do agent
         """
-        try:
-            # Se houver arquivo, processa primeiro
-            context = ""
-            file_info = ""
-            
-            if file_path and os.path.exists(file_path):
-                ext = os.path.splitext(file_path)[1].lower()
-                file_info = f"\n[Arquivo processado: {os.path.basename(file_path)}]"
+        trace_ctx = create_trace(name="adk_chat", input_data={"message": message[:200]})
+        
+        if not trace_ctx:
+            # Fallback se Langfuse desabilitado
+            return await self._chat_internal(message, file_path)
+        
+        with trace_ctx:
+            try:
+                # Se houver arquivo, processa primeiro
+                context = ""
+                file_info = ""
                 
-                if ext == ".pdf":
-                    result = await self.extract_pdf_text(file_path)
-                else:
-                    result = await self.extract_image_text(file_path)
-                
-                if result.get("success"):
-                    # Verifica se encontrou texto significativo
-                    total_chars = result.get('total_characters', 0)
-                    pages_with_text = result.get('pages_with_text', 0)
-                    summary = result.get('summary', '')
+                if file_path and os.path.exists(file_path):
+                    ext = os.path.splitext(file_path)[1].lower()
+                    file_info = f"\n[Arquivo processado: {os.path.basename(file_path)}]"
                     
-                    if total_chars < 50:
-                        # Pouco ou nenhum texto encontrado
-                        context = f"\n\n[AVISO IMPORTANTE - Conteúdo do arquivo]:\n{summary}\n\nO arquivo foi processado mas não foi possível extrair texto significativo. Possíveis causas:\n1. O PDF pode estar vazio ou conter apenas imagens/graphics\n2. A qualidade da imagem pode ser muito baixa para OCR\n3. O arquivo pode estar protegido ou criptografado\n4. O texto pode estar em uma fonte não reconhecível\n\nRecomendações:\n- Verifique se o arquivo está correto e contém texto legível\n- Tente com um arquivo de melhor qualidade\n- Se for uma fatura/boleto, verifique se não está em formato de imagem muito comprimida"
+                    if ext == ".pdf":
+                        result = await self.extract_pdf_text(file_path)
                     else:
-                        text_content = result.get('text', result.get('summary', ''))
-                        # Limita tamanho para não sobrecarregar o contexto
-                        if len(text_content) > 5000:
-                            text_content = text_content[:5000] + "\n... (texto truncado)"
-                        context = f"\n\n[Conteúdo extraído do arquivo - {pages_with_text} página(s) com texto]:\n{text_content}"
+                        result = await self.extract_image_text(file_path)
+                    
+                    if result.get("success"):
+                        # Verifica se encontrou texto significativo
+                        total_chars = result.get('total_characters', 0)
+                        pages_with_text = result.get('pages_with_text', 0)
+                        summary = result.get('summary', '')
+                        
+                        if total_chars < 50:
+                            # Pouco ou nenhum texto encontrado
+                            context = f"\n\n[AVISO IMPORTANTE - Conteúdo do arquivo]:\n{summary}\n\nO arquivo foi processado mas não foi possível extrair texto significativo. Possíveis causas:\n1. O PDF pode estar vazio ou conter apenas imagens/graphics\n2. A qualidade da imagem pode ser muito baixa para OCR\n3. O arquivo pode estar protegido ou criptografado\n4. O texto pode estar em uma fonte não reconhecível\n\nRecomendações:\n- Verifique se o arquivo está correto e contém texto legível\n- Tente com um arquivo de melhor qualidade\n- Se for uma fatura/boleto, verifique se não está em formato de imagem muito comprimida"
+                        else:
+                            text_content = result.get('text', result.get('summary', ''))
+                            # Limita tamanho para não sobrecarregar o contexto
+                            if len(text_content) > 5000:
+                                text_content = text_content[:5000] + "\n... (texto truncado)"
+                            context = f"\n\n[Conteúdo extraído do arquivo - {pages_with_text} página(s) com texto]:\n{text_content}"
+                    else:
+                        context = f"\n\n[Erro ao processar arquivo]: {result.get('error', 'Erro desconhecido')}"
+                
+                # Prepara mensagem completa
+                full_message = message + file_info + context
+                
+                # Adiciona ao histórico
+                self.chat_history.append({"role": "user", "parts": [full_message]})
+                
+                # Gera resposta usando o modelo
+                gen_span_ctx = create_span(name="gemini_generate")
+                
+                if gen_span_ctx:
+                    with gen_span_ctx:
+                        gen_span_ctx.update(input={
+                            "model": self.model_name,
+                            "temperature": 0.7,
+                            "top_p": 0.8,
+                            "top_k": 40
+                        })
+                        
+                        response = self.model.generate_content(
+                            full_message,
+                            generation_config={
+                                "temperature": 0.7,
+                                "top_p": 0.8,
+                                "top_k": 40,
+                            }
+                        )
+                        
+                        response_text = response.text
+                        
+                        # Não enviar resposta completa: truncar/mask
+                        gen_span_ctx.update(output={"response_preview": response_text[:500]})
                 else:
-                    context = f"\n\n[Erro ao processar arquivo]: {result.get('error', 'Erro desconhecido')}"
+                    # Fallback sem rastreamento
+                    response = self.model.generate_content(
+                        full_message,
+                        generation_config={
+                            "temperature": 0.7,
+                            "top_p": 0.8,
+                            "top_k": 40,
+                        }
+                    )
+                    response_text = response.text
+                
+                # Adiciona resposta ao histórico
+                self.chat_history.append({"role": "model", "parts": [response_text]})
+                
+                # Limita histórico (mantém últimas 10 mensagens)
+                if len(self.chat_history) > 20:
+                    self.chat_history = self.chat_history[-20:]
+                
+                trace_ctx.update(output={"response_preview": response_text[:200]})
+                
+                return response_text
+                
+            except Exception as e:
+                logger.error(f"Erro no chat: {e}")
+                import traceback
+                traceback.print_exc()
+                log_error(f"adk_chat_error: {e}")
+                trace_ctx.update(output={"error": str(e)})
+                return f"❌ Erro ao processar: {str(e)}"
+    
+    async def _chat_internal(self, message: str, file_path: Optional[str] = None) -> str:
+        """Implementação interna do chat (sem rastreamento)"""
+        # Mesma lógica do chat, mas sem Langfuse
+        context = ""
+        file_info = ""
+        
+        if file_path and os.path.exists(file_path):
+            ext = os.path.splitext(file_path)[1].lower()
+            file_info = f"\n[Arquivo processado: {os.path.basename(file_path)}]"
             
-            # Prepara mensagem completa
-            full_message = message + file_info + context
+            if ext == ".pdf":
+                result = await self.extract_pdf_text(file_path)
+            else:
+                result = await self.extract_image_text(file_path)
             
-            # Adiciona ao histórico
-            self.chat_history.append({"role": "user", "parts": [full_message]})
-            
-            # Gera resposta usando o modelo
-            response = self.model.generate_content(
-                full_message,
-                generation_config={
-                    "temperature": 0.7,
-                    "top_p": 0.8,
-                    "top_k": 40,
-                }
-            )
-            
-            response_text = response.text
-            
-            # Adiciona resposta ao histórico
-            self.chat_history.append({"role": "model", "parts": [response_text]})
-            
-            # Limita histórico (mantém últimas 10 mensagens)
-            if len(self.chat_history) > 20:
-                self.chat_history = self.chat_history[-20:]
-            
-            return response_text
-            
-        except Exception as e:
-            logger.error(f"Erro no chat: {e}")
-            import traceback
-            traceback.print_exc()
-            return f"❌ Erro ao processar: {str(e)}"
+            if result.get("success"):
+                total_chars = result.get('total_characters', 0)
+                pages_with_text = result.get('pages_with_text', 0)
+                summary = result.get('summary', '')
+                
+                if total_chars < 50:
+                    context = f"\n\n[AVISO IMPORTANTE - Conteúdo do arquivo]:\n{summary}\n\nO arquivo foi processado mas não foi possível extrair texto significativo."
+                else:
+                    text_content = result.get('text', result.get('summary', ''))
+                    if len(text_content) > 5000:
+                        text_content = text_content[:5000] + "\n... (texto truncado)"
+                    context = f"\n\n[Conteúdo extraído do arquivo - {pages_with_text} página(s) com texto]:\n{text_content}"
+            else:
+                context = f"\n\n[Erro ao processar arquivo]: {result.get('error', 'Erro desconhecido')}"
+        
+        full_message = message + file_info + context
+        self.chat_history.append({"role": "user", "parts": [full_message]})
+        
+        response = self.model.generate_content(
+            full_message,
+            generation_config={
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 40,
+            }
+        )
+        
+        response_text = response.text
+        self.chat_history.append({"role": "model", "parts": [response_text]})
+        
+        if len(self.chat_history) > 20:
+            self.chat_history = self.chat_history[-20:]
+        
+        return response_text
 
 
 # Função para executar o agent via CLI

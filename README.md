@@ -104,3 +104,52 @@ curl -X POST http://localhost:8000/extract-boleto \
 ## 📝 Licença
 MIT
 
+## 🔎 Observabilidade (Langfuse)
+
+Integração opcional para rastrear requisições, OCR, extração de campos e chamadas ao LLM (Gemini) com traces/spans.
+
+### 1) Instalação
+- Já incluído em `requirements.txt` (langfuse). Se necessário:
+```bash
+pip install langfuse
+```
+
+### 2) Variáveis de ambiente
+Defina as seguintes variáveis (ex.: `.env` ou sessão atual):
+```
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=seu_public_key
+LANGFUSE_SECRET_KEY=seu_secret_key
+LANGFUSE_HOST=https://cloud.langfuse.com  # ou sua URL de self-host
+```
+
+No Windows PowerShell:
+```powershell
+$env:LANGFUSE_ENABLED='true'
+$env:LANGFUSE_PUBLIC_KEY='seu_public_key'
+$env:LANGFUSE_SECRET_KEY='seu_secret_key'
+$env:LANGFUSE_HOST='https://cloud.langfuse.com'
+```
+
+### 3) O que é rastreado
+- Traces por requisição HTTP na API OCR (`api/agent.py`).
+- Spans de OCR: `ocr_tesseract`, `ocr_easyocr`, `ocr_pdf`.
+- Span de extração de campos: `extract_boleto_fields` (com PII mascarada).
+- No ADK (`adk/adk_agent.py`): trace `adk_chat` e span `gemini_generate` com preview de resposta.
+
+### 4) Execução
+- API OCR (porta 8000):
+```bash
+uvicorn api.agent:app --host 0.0.0.0 --port 8000
+```
+- Interface ADK (porta 8001):
+```bash
+python adk/web_server.py
+```
+
+### 5) Boas práticas de privacidade
+- PII é mascarada antes do envio (CNPJ/CPF, linha digitável). Evite anexar documentos.
+- Use retenção curta no Langfuse e sampling menor em produção.
+
+### 6) Referência
+- Documentação oficial: https://langfuse.com/docs

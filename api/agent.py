@@ -3,7 +3,7 @@ Agent de Transcrição - OCR com extração de campos de boleto
 Suporta PDF e imagens com múltiplos engines de OCR
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import JSONResponse
 from typing import Optional, List, Dict, Any
 import fitz  # PyMuPDF
@@ -18,6 +18,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 import logging
+import uuid
+
+# Observabilidade centralizada
+from api.observability import (
+    create_trace, create_span, log_error, get_langfuse_client, is_enabled, mask_pii
+)
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -34,31 +40,122 @@ last_json_extracted: Dict[str, Any] = {}
 ID_SEQUENCIAL: int = 0
 
 
+@app.middleware("http")
+async def langfuse_http_tracing(request: Request, call_next):
+    """Middleware para rastrear requisições HTTP no Langfuse"""
+    if not is_enabled():
+        return await call_next(request)
+    
+    trace_ctx = create_trace(
+        name=f"HTTP {request.method} {request.url.path}",
+        input_data={
+            "path": request.url.path,
+            "query": dict(request.query_params),
+            "method": request.method,
+        },
+        # metadados adicionais seguem via update_current_trace(metadata=...)
+        metadata={"service": "ocr-service", "framework": "fastapi"}
+    )
+    
+    if not trace_ctx:
+        return await call_next(request)
+    
+    # Usa async context manager para o trace
+    async with trace_ctx:
+        try:
+            response = await call_next(request)
+            trace_ctx.update(output={"status_code": response.status_code})
+            return response
+        except Exception as e:
+            trace_ctx.update(output={"error": str(e)})
+            log_error(f"HTTP {request.method} {request.url.path}: {e}")
+            raise
+
+
+
 def ocr_with_tesseract(image_bytes: bytes, lang: str = "por+eng") -> str:
     """Executa OCR usando Tesseract"""
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-        text = pytesseract.image_to_string(image, lang=lang)
-        return text.strip()
-    except Exception as e:
-        logger.error(f"Erro no Tesseract: {e}")
-        return ""
+    span_ctx = create_span(name="ocr_tesseract", input_data={"lang": lang})
+    
+    if not span_ctx:
+        # Fallback se Langfuse desabilitado
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            text = pytesseract.image_to_string(image, lang=lang)
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Erro no Tesseract: {e}")
+            return ""
+    
+    with span_ctx:
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            text = pytesseract.image_to_string(image, lang=lang)
+            span_ctx.update(output={"chars": len(text)})
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Erro no Tesseract: {e}")
+            log_error(f"ocr_tesseract_error: {e}")
+            return ""
 
 
 def ocr_with_easyocr(image_bytes: bytes, languages: List[str] = ["pt", "en"]) -> str:
     """Executa OCR usando EasyOCR como fallback"""
-    try:
-        import easyocr
-        reader = easyocr.Reader(languages, gpu=False)
-        results = reader.readtext(image_bytes, detail=0)
-        return " ".join(results)
-    except Exception as e:
-        logger.error(f"Erro no EasyOCR: {e}")
-        return ""
+    span_ctx = create_span(name="ocr_easyocr", input_data={"languages": languages})
+    
+    if not span_ctx:
+        # Fallback se Langfuse desabilitado
+        try:
+            import easyocr
+            reader = easyocr.Reader(languages, gpu=False)
+            results = reader.readtext(image_bytes, detail=0)
+            return " ".join(results)
+        except Exception as e:
+            logger.error(f"Erro no EasyOCR: {e}")
+            return ""
+    
+    with span_ctx:
+        try:
+            import easyocr
+            reader = easyocr.Reader(languages, gpu=False)
+            results = reader.readtext(image_bytes, detail=0)
+            text = " ".join(results)
+            span_ctx.update(output={"chars": len(text)})
+            return text
+        except Exception as e:
+            logger.error(f"Erro no EasyOCR: {e}")
+            log_error(f"ocr_easyocr_error: {e}")
+            return ""
 
 
 def ocr_pdf(pdf_path: str, lang: str = "por+eng", use_ocrmypdf: bool = True) -> List[Dict[str, Any]]:
     """Processa PDF com OCR usando ocrmypdf ou PyMuPDF + Tesseract"""
+    result = []
+    span_pdf = create_span(
+        name="ocr_pdf",
+        input_data={"path": str(Path(pdf_path).name), "lang": lang}
+    )
+    
+    if not span_pdf:
+        # Fallback se Langfuse desabilitado - executa sem rastreamento
+        return _ocr_pdf_internal(pdf_path, lang, use_ocrmypdf)
+    
+    with span_pdf:
+        try:
+            result = _ocr_pdf_internal(pdf_path, lang, use_ocrmypdf)
+            span_pdf.update(output={"pages": len(result)})
+            return result
+        except Exception as e:
+            logger.error(f"Erro ao processar PDF: {e}")
+            import traceback
+            traceback.print_exc()
+            log_error(f"ocr_pdf_error: {e}")
+            span_pdf.update(output={"error": str(e)})
+            raise
+
+
+def _ocr_pdf_internal(pdf_path: str, lang: str = "por+eng", use_ocrmypdf: bool = True) -> List[Dict[str, Any]]:
+    """Implementação interna do OCR PDF (sem rastreamento)"""
     result = []
     
     try:
@@ -211,6 +308,26 @@ def ocr_pdf(pdf_path: str, lang: str = "por+eng", use_ocrmypdf: bool = True) -> 
 
 def extract_boleto_fields(text: str) -> Dict[str, Any]:
     """Extrai campos principais de um boleto bancário"""
+    span_ctx = create_span(name="extract_boleto_fields")
+    
+    if not span_ctx:
+        # Fallback se Langfuse desabilitado
+        return _extract_boleto_fields_internal(text)
+    
+    with span_ctx:
+        cleaned = _extract_boleto_fields_internal(text)
+        # Envia apenas metadados, com PII mascarada
+        span_ctx.update(output={
+            "found": list(cleaned.keys()),
+            "linha_digitavel": mask_pii(cleaned.get("linha_digitavel")),
+            "cpf_cnpj": mask_pii(cleaned.get("cpf_cnpj")),
+            "vencimento": cleaned.get("vencimento"),
+        })
+        return cleaned
+
+
+def _extract_boleto_fields_internal(text: str) -> Dict[str, Any]:
+    """Implementação interna da extração de campos (sem rastreamento)"""
     fields = {
         "banco": None,
         "linha_digitavel": None,
@@ -397,7 +514,8 @@ def extract_boleto_fields(text: str) -> Dict[str, Any]:
             break
     
     # Remove campos None
-    return {k: v for k, v in fields.items() if v is not None}
+    cleaned = {k: v for k, v in fields.items() if v is not None}
+    return cleaned
 
 
 def format_boleto_core_fields(full_text: str) -> Dict[str, Any]:
