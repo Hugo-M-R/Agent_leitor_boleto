@@ -707,17 +707,30 @@ async def extract_boleto_fields_min(
     }
 
 
-@app.get("/get_last_json_extracted")
+@app.get("/get_last_json_extracted", response_class=JSONResponse)
 def get_last_json_extracted():
     """
     Retorna o último JSON extraído/simulado para consumo por outro agente (via GET).
+    Garante Content-Type: application/json e encoding UTF-8.
     """
     if not last_json_extracted:
         raise HTTPException(status_code=404, detail="Nenhum dado extraído disponível.")
     # Oculta campos internos
     hidden_keys = {"id_processo", "arquivo", "status_pronto"}
     filtered = {k: v for k, v in last_json_extracted.items() if k not in hidden_keys}
-    return filtered
+    
+    # Log para debug (sem dados sensíveis)
+    logger.info(f"Retornando JSON extraído com {len(filtered)} campos: {list(filtered.keys())}")
+    
+    # Log do conteúdo (mascarado para segurança)
+    masked_content = {k: mask_pii(str(v)) if isinstance(v, str) else v for k, v in filtered.items()}
+    logger.debug(f"Conteúdo retornado (mascarado): {masked_content}")
+    
+    # Retorna explicitamente como JSONResponse para garantir Content-Type correto
+    return JSONResponse(
+        content=filtered,
+        media_type="application/json; charset=utf-8"
+    )
 
 
 @app.post("/extract-from-path")

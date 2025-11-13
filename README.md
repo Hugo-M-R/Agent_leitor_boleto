@@ -1,4 +1,4 @@
-# Agent de Transcrição OCR 🎯
+# Agent de Transcrição OCR
 
 Serviço de OCR (Reconhecimento Óptico de Caracteres) com extração automática de campos de boleto bancário. Inclui:
 - API REST para OCR (FastAPI)

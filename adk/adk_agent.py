@@ -9,6 +9,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 import json
+import requests
 
 # Carrega variáveis de ambiente do arquivo .env
 try:
@@ -24,9 +25,19 @@ try:
     GEMINI_AVAILABLE = True
 except ImportError:
     # Fallback caso não esteja instalado
-    print("⚠️  Google Generative AI não encontrado. Instale com: pip install google-generativeai")
     genai = None
     GEMINI_AVAILABLE = False
+
+# OpenAI API imports
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    openai = None
+    OPENAI_AVAILABLE = False
+
+# OpenRouter não requer biblioteca especial, usa requests diretamente
+OPENROUTER_AVAILABLE = True
 
 # Importa funções do agent de OCR
 from api.agent import (
@@ -46,34 +57,180 @@ logger = logging.getLogger(__name__)
 
 
 class OCRAgent:
-    """Agent de OCR usando Google ADK"""
+    """Agent de OCR usando OpenRouter, OpenAI ou Google Gemini"""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, provider: Optional[str] = None):
         """
         Inicializa o agent
         
         Args:
-            api_key: Chave da API do Google (ou usa GOOGLE_API_KEY do env)
+            api_key: Chave da API (OpenRouter, OpenAI ou Google)
+            provider: "openrouter", "openai" ou "gemini" (auto-detecta se None)
         """
+        # Detecta qual provider usar
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+        google_key = os.getenv("GOOGLE_API_KEY") or api_key
+        
+        if provider is None:
+            # Auto-detecção: prioriza OpenRouter, depois OpenAI, depois Gemini
+            if openrouter_key and OPENROUTER_AVAILABLE:
+                provider = "openrouter"
+            elif openai_key and OPENAI_AVAILABLE:
+                provider = "openai"
+            elif google_key and GEMINI_AVAILABLE:
+                provider = "gemini"
+            else:
+                raise ValueError(
+                    "Nenhuma API configurada. Configure OPENROUTER_API_KEY, OPENAI_API_KEY ou GOOGLE_API_KEY. "
+                    "Instale: pip install openai (ou google-generativeai)"
+                )
+        
+        self.provider = provider.lower()
+        self.api_key = api_key
+        
+        if self.provider == "openrouter":
+            self._init_openrouter(openrouter_key)
+        elif self.provider == "openai":
+            self._init_openai(openai_key)
+        elif self.provider == "gemini":
+            self._init_gemini(google_key)
+        else:
+            raise ValueError(f"Provider inválido: {provider}. Use 'openrouter', 'openai' ou 'gemini'")
+        
+        # Histórico de conversa
+        self.chat_history = []
+    
+    def _init_openrouter(self, api_key: Optional[str]):
+        """Inicializa cliente OpenRouter"""
+        if not OPENROUTER_AVAILABLE:
+            raise ImportError("OpenRouter requer biblioteca requests (já incluída)")
+        
+        self.api_key = api_key or self.api_key or os.getenv("OPENROUTER_API_KEY")
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY não encontrada. Configure a variável de ambiente.")
+        
+        # Modelos OpenRouter em ordem de preferência (gratuitos ou baratos)
+        # Formato: "provider/model-name"
+        model_names = [
+            "meta-llama/llama-3.2-3b-instruct",  # Gratuito, leve, FUNCIONA ✅
+            "mistralai/mistral-7b-instruct",    # Gratuito
+            "google/gemini-2.0-flash-exp",       # Gratuito, rápido (se disponível)
+            "google/gemini-1.5-flash",           # Gratuito, rápido
+            "openai/gpt-4o-mini",                # Barato, rápido
+            "openai/gpt-4o",                     # Mais capaz
+            "anthropic/claude-3-haiku",          # Rápido e eficiente
+        ]
+        
+        self.model_name = None
+        self.api_url = "https://openrouter.ai/api/v1/chat/completions"
+        
+        # Testa cada modelo fazendo uma chamada real
+        for model_name in model_names:
+            try:
+                logger.info(f"🧪 Testando modelo OpenRouter: {model_name}...")
+                
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/your-repo",  # Opcional, mas recomendado
+                }
+                
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "user", "content": "Test"}
+                    ],
+                    "max_tokens": 5
+                }
+                
+                response = requests.post(
+                    self.api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=15
+                )
+                
+                if response.status_code == 200:
+                    self.model_name = model_name
+                    logger.info(f"✅ OpenRouter {model_name} configurado e testado com sucesso!")
+                    break
+                elif response.status_code == 401:
+                    logger.warning(f"❌ API key inválida para {model_name}")
+                    continue
+                elif response.status_code == 402:
+                    logger.warning(f"⚠️  Sem créditos para {model_name}")
+                    continue
+                else:
+                    logger.warning(f"⚠️  Modelo {model_name} retornou status {response.status_code}")
+                    continue
+                    
+            except Exception as e:
+                logger.warning(f"⚠️  Erro ao testar modelo {model_name}: {e}")
+                continue
+        
+        if not self.model_name:
+            raise ValueError(
+                f"Nenhum modelo OpenRouter disponível. "
+                f"Testados: {', '.join(model_names[:5])}. "
+                f"Verifique sua API key e créditos em https://openrouter.ai"
+            )
+        
+        self.model = None  # OpenRouter usa API HTTP direta
+    
+    def _init_openai(self, api_key: Optional[str]):
+        """Inicializa cliente OpenAI"""
+        if not OPENAI_AVAILABLE:
+            raise ImportError("OpenAI não está instalado. Execute: pip install openai")
+        
+        self.api_key = api_key or self.api_key or os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY não encontrada. Configure a variável de ambiente.")
+        
+        self.client = openai.OpenAI(api_key=self.api_key)
+        
+        # Modelos OpenAI em ordem de preferência
+        model_names = [
+            "gpt-4o-mini",      # Mais barato, rápido
+            "gpt-4o",            # Mais capaz
+            "gpt-4-turbo",       # Alternativa
+            "gpt-3.5-turbo",     # Fallback
+        ]
+        
+        self.model_name = None
+        for model_name in model_names:
+            try:
+                # Testa se o modelo está disponível
+                self.model_name = model_name
+                logger.info(f"✅ OpenAI {model_name} configurado!")
+                break
+            except Exception as e:
+                logger.warning(f"Modelo {model_name} não disponível: {e}")
+                continue
+        
+        if not self.model_name:
+            raise ValueError("Nenhum modelo OpenAI disponível.")
+        
+        self.model = None  # OpenAI usa client, não model object
+    
+    def _init_gemini(self, api_key: Optional[str]):
+        """Inicializa cliente Gemini"""
         if not GEMINI_AVAILABLE:
             raise ImportError("Google Generative AI não está instalado. Execute: pip install google-generativeai")
         
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.api_key = api_key or self.api_key or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "GOOGLE_API_KEY não encontrada. "
-                "Configure a variável de ambiente ou passe api_key"
-            )
+            raise ValueError("GOOGLE_API_KEY não encontrada. Configure a variável de ambiente.")
         
         # Configura API do Google
         genai.configure(api_key=self.api_key)
         
         # Tenta diferentes modelos em ordem de preferência
         model_names = [
-            "gemini-2.0-flash-exp", # Modelo experimental mais recente
-            "gemini-pro",           # Modelo mais amplamente disponível
-            "gemini-1.5-flash",     # Alternativa rápida
-            "gemini-1.5-pro",       # Modelo avançado (pode não estar disponível)
+            "gemini-2.0-flash-exp",
+            "gemini-pro",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
         ]
         
         self.model = None
@@ -91,20 +248,14 @@ class OCRAgent:
                     }
                 )
                 self.model_name = model_name
-                logger.info(f"Modelo {model_name} inicializado com sucesso!")
+                logger.info(f"✅ Gemini {model_name} inicializado com sucesso!")
                 break
             except Exception as e:
-                logger.warning(f"Modelo {model_name} nao disponivel: {e}")
+                logger.warning(f"Modelo {model_name} não disponível: {e}")
                 continue
         
         if self.model is None:
-            raise ValueError(
-                "Nenhum modelo Gemini disponível. "
-                "Verifique sua API key e permissões do projeto."
-            )
-        
-        # Histórico de conversa
-        self.chat_history = []
+            raise ValueError("Nenhum modelo Gemini disponível. Verifique sua API key.")
     
     def _get_system_instruction(self) -> str:
         """Retorna instruções do sistema para o agent"""
@@ -117,6 +268,39 @@ Suas responsabilidades:
 3. Identificar e extrair campos de boletos (linha digitável, valor, vencimento, etc.)
 4. Responder perguntas sobre o conteúdo extraído
 5. Fornecer informações estruturadas sobre os documentos processados
+
+FORMATAÇÃO DE RESPOSTAS:
+- Sempre formate dados de boletos de forma visual e organizada
+- Use emojis relevantes para melhorar a legibilidade
+- Organize informações em seções claras com separadores visuais
+- Destaque informações importantes (valores, datas, códigos)
+- Use formatação markdown de forma elegante (tabelas, listas, blocos de código quando apropriado)
+
+EXEMPLO DE FORMATAÇÃO PARA DADOS DE BOLETO:
+Use este formato quando apresentar dados extraídos de boletos:
+
+## 📋 DADOS DO BOLETO
+
+### Informações Principais
+- **📅 Data de Vencimento:** 05/11/2025
+- **🏦 Banco:** PicPay Bank
+- **💰 Valor:** R$ 1.256,00
+
+### Beneficiário
+- **Nome:** PicPay Bank Banco Múltiplo S.A.
+- **CNPJ:** 09.516.419/0001-75
+
+### Pagador
+- **Nome:** GABRIELA ROCHA SANTOS FREITAS
+
+### Linha Digitável
+```
+38090.10006 01429.920059 05875.050311 1 12560000003735
+```
+
+---
+
+*Qualquer outra informação que precisar, é só perguntar.*
 
 Seja sempre claro, preciso e ofereça informações detalhadas sobre os documentos processados."""
     
@@ -276,18 +460,111 @@ Use estas ferramentas quando o usuário solicitar processamento de arquivos.
                 # Adiciona ao histórico
                 self.chat_history.append({"role": "user", "parts": [full_message]})
                 
-                # Gera resposta usando o modelo
-                gen_span_ctx = create_span(name="gemini_generate")
+                # Gera resposta usando o modelo (OpenRouter, OpenAI ou Gemini)
+                provider_name = f"{self.provider}_generate"
+                gen_span_ctx = create_span(
+                    name=provider_name,
+                    input_data={
+                        "model": self.model_name,
+                        "provider": self.provider,
+                        "temperature": 0.7,
+                    }
+                )
                 
-                if gen_span_ctx:
-                    with gen_span_ctx:
-                        gen_span_ctx.update(input={
-                            "model": self.model_name,
-                            "temperature": 0.7,
-                            "top_p": 0.8,
-                            "top_k": 40
-                        })
-                        
+                if self.provider == "openrouter":
+                    # Usa OpenRouter
+                    messages = [
+                        {"role": "system", "content": self._get_system_instruction()}
+                    ]
+                    # Adiciona histórico (já inclui a mensagem atual que foi adicionada acima)
+                    for msg in self.chat_history[-10:]:  # Últimas 10 mensagens
+                        role = msg.get("role", "user")
+                        if role == "user":
+                            messages.append({"role": "user", "content": msg.get("parts", [""])[0]})
+                        elif role == "model" or role == "assistant":
+                            messages.append({"role": "assistant", "content": msg.get("parts", [""])[0]})
+                    
+                    headers = {
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/your-repo",  # Opcional, mas recomendado
+                    }
+                    
+                    payload = {
+                        "model": self.model_name,
+                        "messages": messages,
+                        "temperature": 0.7,
+                        "max_tokens": 1000
+                    }
+                    
+                    if gen_span_ctx:
+                        with gen_span_ctx:
+                            response = requests.post(
+                                self.api_url,
+                                headers=headers,
+                                json=payload,
+                                timeout=60
+                            )
+                            response.raise_for_status()
+                            result = response.json()
+                            response_text = result["choices"][0]["message"]["content"]
+                            gen_span_ctx.update(output={"response_preview": response_text[:500]})
+                    else:
+                        response = requests.post(
+                            self.api_url,
+                            headers=headers,
+                            json=payload,
+                            timeout=60
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                        response_text = result["choices"][0]["message"]["content"]
+                
+                elif self.provider == "openai":
+                    # Usa OpenAI
+                    messages = [
+                        {"role": "system", "content": self._get_system_instruction()}
+                    ]
+                    # Adiciona histórico (já inclui a mensagem atual que foi adicionada acima)
+                    for msg in self.chat_history[-10:]:  # Últimas 10 mensagens
+                        role = msg.get("role", "user")
+                        if role == "user":
+                            messages.append({"role": "user", "content": msg.get("parts", [""])[0]})
+                        elif role == "model" or role == "assistant":
+                            messages.append({"role": "assistant", "content": msg.get("parts", [""])[0]})
+                    
+                    if gen_span_ctx:
+                        with gen_span_ctx:
+                            response = self.client.chat.completions.create(
+                                model=self.model_name,
+                                messages=messages,
+                                temperature=0.7,
+                            )
+                            response_text = response.choices[0].message.content
+                            gen_span_ctx.update(output={"response_preview": response_text[:500]})
+                    else:
+                        response = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=messages,
+                            temperature=0.7,
+                        )
+                        response_text = response.choices[0].message.content
+                
+                else:
+                    # Usa Gemini (código original)
+                    if gen_span_ctx:
+                        with gen_span_ctx:
+                            response = self.model.generate_content(
+                                full_message,
+                                generation_config={
+                                    "temperature": 0.7,
+                                    "top_p": 0.8,
+                                    "top_k": 40,
+                                }
+                            )
+                            response_text = response.text
+                            gen_span_ctx.update(output={"response_preview": response_text[:500]})
+                    else:
                         response = self.model.generate_content(
                             full_message,
                             generation_config={
@@ -296,25 +573,14 @@ Use estas ferramentas quando o usuário solicitar processamento de arquivos.
                                 "top_k": 40,
                             }
                         )
-                        
                         response_text = response.text
-                        
-                        # Não enviar resposta completa: truncar/mask
-                        gen_span_ctx.update(output={"response_preview": response_text[:500]})
-                else:
-                    # Fallback sem rastreamento
-                    response = self.model.generate_content(
-                        full_message,
-                        generation_config={
-                            "temperature": 0.7,
-                            "top_p": 0.8,
-                            "top_k": 40,
-                        }
-                    )
-                    response_text = response.text
                 
                 # Adiciona resposta ao histórico
-                self.chat_history.append({"role": "model", "parts": [response_text]})
+                if self.provider == "openai" or self.provider == "openrouter":
+                    role = "assistant"
+                else:
+                    role = "model"
+                self.chat_history.append({"role": role, "parts": [response_text]})
                 
                 # Limita histórico (mantém últimas 10 mensagens)
                 if len(self.chat_history) > 20:

@@ -21,6 +21,13 @@ if sys.platform == "win32":
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.buffer, "strict")
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.buffer, "strict")
 
+# Adiciona o diretório raiz ao sys.path para permitir imports quando executado diretamente
+# Isso permite executar: python adk/web_server.py
+if __name__ == "__main__" or __file__.endswith("web_server.py"):
+    root_dir = Path(__file__).parent.parent
+    if str(root_dir) not in sys.path:
+        sys.path.insert(0, str(root_dir))
+
 # Carrega variáveis de ambiente do arquivo .env
 try:
     from dotenv import load_dotenv
@@ -39,16 +46,20 @@ async def lifespan(app: FastAPI):
     """Lifespan handler para inicializar e limpar recursos"""
     global agent
     
-    # Startup
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if api_key:
+    # Startup - detecta automaticamente OpenRouter, OpenAI ou Gemini
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    google_key = os.getenv("GOOGLE_API_KEY")
+    
+    if openrouter_key or openai_key or google_key:
         try:
-            agent = OCRAgent(api_key=api_key)
-            print("[OK] Agent ADK inicializado!")
+            agent = OCRAgent()  # Auto-detecta provider
+            provider = agent.provider.upper()
+            print(f"[OK] Agent ADK inicializado com {provider}!")
         except Exception as e:
             print(f"[ERRO] Erro ao inicializar agent: {e}")
     else:
-        print("[AVISO] GOOGLE_API_KEY nao configurada. Configure a variavel de ambiente.")
+        print("[AVISO] Nenhuma API configurada. Configure OPENROUTER_API_KEY, OPENAI_API_KEY ou GOOGLE_API_KEY.")
     
     yield
     
@@ -69,6 +80,7 @@ async def get_chat_interface():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent OCR - Chat Interface</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -158,6 +170,97 @@ async def get_chat_interface():
             color: #333;
             border: 1px solid #e0e0e0;
             border-bottom-left-radius: 4px;
+        }
+        
+        /* Estilos para Markdown renderizado */
+        .message-content h1, .message-content h2, .message-content h3 {
+            margin: 10px 0 8px 0;
+            font-weight: 600;
+        }
+        
+        .message-content h2 {
+            font-size: 18px;
+            color: #667eea;
+        }
+        
+        .message-content h3 {
+            font-size: 16px;
+        }
+        
+        .message-content p {
+            margin: 8px 0;
+            line-height: 1.6;
+        }
+        
+        .message-content ul, .message-content ol {
+            margin: 8px 0;
+            padding-left: 20px;
+        }
+        
+        .message-content li {
+            margin: 4px 0;
+            line-height: 1.5;
+        }
+        
+        .message-content code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #e83e8c;
+        }
+        
+        .message-content pre {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 12px;
+            margin: 10px 0;
+            overflow-x: auto;
+        }
+        
+        .message-content pre code {
+            background: transparent;
+            padding: 0;
+            color: #333;
+            font-size: 0.85em;
+        }
+        
+        .message-content strong {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .message-content blockquote {
+            border-left: 3px solid #667eea;
+            padding-left: 12px;
+            margin: 10px 0;
+            color: #666;
+            font-style: italic;
+        }
+        
+        .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }
+        
+        .message-content table td, .message-content table th {
+            border: 1px solid #e0e0e0;
+            padding: 8px;
+            text-align: left;
+        }
+        
+        .message-content table th {
+            background: #f8f9fa;
+            font-weight: 600;
+        }
+        
+        .message-content hr {
+            border: none;
+            border-top: 1px solid #e0e0e0;
+            margin: 15px 0;
         }
         
         .input-area {
@@ -296,7 +399,19 @@ async def get_chat_interface():
         function addMessage(sender, text) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${sender}`;
-            messageDiv.innerHTML = `<div class="message-content">${text}</div>`;
+            
+            // Renderiza markdown se for mensagem do agente
+            let content = text;
+            if (sender === 'agent' && typeof marked !== 'undefined') {
+                try {
+                    content = marked.parse(text);
+                } catch (e) {
+                    console.warn('Erro ao renderizar markdown:', e);
+                    content = text;
+                }
+            }
+            
+            messageDiv.innerHTML = `<div class="message-content">${content}</div>`;
             chatArea.appendChild(messageDiv);
             chatArea.scrollTop = chatArea.scrollHeight;
         }
@@ -382,7 +497,7 @@ async def chat_endpoint(
     if not agent:
         return JSONResponse(
             status_code=503,
-            content={"error": "Agent não inicializado. Configure GOOGLE_API_KEY."}
+            content={"error": "Agent não inicializado. Configure OPENROUTER_API_KEY, OPENAI_API_KEY ou GOOGLE_API_KEY."}
         )
     
     try:
@@ -425,4 +540,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8002)
