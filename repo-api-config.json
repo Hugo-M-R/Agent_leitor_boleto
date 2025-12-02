@@ -1,0 +1,139 @@
+{
+  "repo_name": "Agent_leitor_boleto",
+  "version": "1.0.0",
+  "base_url": "http://localhost:8000",
+  "description": "Serviço responsável por extrair dados de boletos usando OCR (Reconhecimento Óptico de Caracteres)",
+  "endpoints": [
+    {
+      "route": "/",
+      "method": "GET",
+      "description": "Endpoint raiz que retorna informações sobre o serviço e lista de endpoints disponíveis",
+      "parameters": [],
+      "response_type": "application/json",
+      "tags": ["info"]
+    },
+    {
+      "route": "/get_last_json_extracted",
+      "method": "GET",
+      "description": "Retorna o último JSON extraído do boleto processado. Retorna apenas os campos essenciais (linha_digitavel, data_vencimento, cnpj_beneficiario, beneficiario) sem campos internos como id_processo, arquivo e status_pronto",
+      "parameters": [],
+      "response_type": "application/json",
+      "tags": ["boleto", "extraction"]
+    },
+    {
+      "route": "/extract",
+      "method": "POST",
+      "description": "Extrai texto de PDF ou imagem usando OCR. Suporta múltiplos engines (ocrmypdf, Tesseract, EasyOCR) com fallback automático",
+      "parameters": [
+        {
+          "name": "file",
+          "type": "file",
+          "required": true,
+          "description": "Arquivo PDF ou imagem (jpg, png, tiff, bmp) a ser processado"
+        },
+        {
+          "name": "lang",
+          "type": "string",
+          "required": false,
+          "description": "Idioma para OCR (padrão: por+eng)"
+        },
+        {
+          "name": "extract_fields",
+          "type": "boolean",
+          "required": false,
+          "description": "Se True, tenta extrair campos de boleto além do texto"
+        }
+      ],
+      "response_type": "application/json",
+      "tags": ["ocr", "extraction"]
+    },
+    {
+      "route": "/extract-boleto",
+      "method": "POST",
+      "description": "Extrai texto e campos de boleto de PDF ou imagem. Equivalente a /extract com extract_fields=True",
+      "parameters": [
+        {
+          "name": "file",
+          "type": "file",
+          "required": true,
+          "description": "Arquivo PDF ou imagem do boleto a ser processado"
+        },
+        {
+          "name": "lang",
+          "type": "string",
+          "required": false,
+          "description": "Idioma para OCR (padrão: por+eng)"
+        }
+      ],
+      "response_type": "application/json",
+      "tags": ["boleto", "extraction"]
+    },
+    {
+      "route": "/extract-boleto-fields",
+      "method": "POST",
+      "description": "Extrai apenas os campos essenciais do boleto e retorna JSON mínimo. Armazena o resultado para consumo via /get_last_json_extracted. Campos retornados: vencimento, linha_digitavel, beneficiario_cnpj, beneficiario_nome",
+      "parameters": [
+        {
+          "name": "file",
+          "type": "file",
+          "required": true,
+          "description": "Arquivo PDF ou imagem do boleto a ser processado"
+        },
+        {
+          "name": "lang",
+          "type": "string",
+          "required": false,
+          "description": "Idioma para OCR (padrão: por+eng)"
+        }
+      ],
+      "response_type": "application/json",
+      "tags": ["boleto", "extraction"]
+    },
+    {
+      "route": "/extract-from-path",
+      "method": "POST",
+      "description": "Extrai texto de arquivo pelo caminho no servidor. Útil quando o arquivo já está disponível no sistema de arquivos do servidor",
+      "parameters": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "Caminho do arquivo no servidor a ser processado"
+        },
+        {
+          "name": "lang",
+          "type": "string",
+          "required": false,
+          "description": "Idioma para OCR (padrão: por+eng)"
+        },
+        {
+          "name": "extract_fields",
+          "type": "boolean",
+          "required": false,
+          "description": "Se True, tenta extrair campos de boleto além do texto"
+        }
+      ],
+      "response_type": "application/json",
+      "tags": ["ocr", "extraction"]
+    }
+  ],
+  "dependencies": {
+    "consumes": [],
+    "provides": [
+      {
+        "repo": "agente-boleto-validador",
+        "endpoints": [
+          "/get_last_json_extracted",
+          "/extract-boleto",
+          "/extract-boleto-fields"
+        ],
+        "description": "Fornece serviços de extração de boletos para o validador. O endpoint /get_last_json_extracted permite que o validador obtenha os dados extraídos do último boleto processado"
+      }
+    ]
+  },
+  "observability": {
+    "langfuse_enabled": true,
+    "description": "Integração com Langfuse para rastreamento de requisições HTTP, operações de OCR e extração de campos. PII (dados pessoais) são mascarados antes do envio"
+  }
+}
+
