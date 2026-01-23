@@ -14,3 +14,5 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 langfuse>=2.0.0
 
+torch>=2.10.0 # not directly required, pinned by Snyk to avoid a vulnerability
+wheel>=0.46.2 # not directly required, pinned by Snyk to avoid a vulnerability
